@@ -109,7 +109,7 @@ class DashboardState:
             if template_path is None:
                 raise SubmissionValidationError("Bundle is missing required sample_submission.json")
             payload = build_submission(application_run.report.decisions, load_submission_template(template_path))
-            write_submission(payload, self.output_path)
+            _write_submission_preserving_newline_style(payload, self.output_path)
         return DashboardSnapshot(
             application_run=application_run,
             runtime_seconds=time.perf_counter() - started,
@@ -126,7 +126,10 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[origin.strip() for origin in os.getenv("AVERIS_CORS_ORIGINS", "http://localhost:3000").split(",")],
+    allow_origins=[
+        origin.strip()
+        for origin in os.getenv("AVERIS_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    ],
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -354,3 +357,19 @@ def _extraction_status(decision: EmailDecision) -> str:
     if decision.category == "BL_COMPARISON":
         return "COMPLETE"
     return "NOT_REQUIRED"
+
+
+def _write_submission_preserving_newline_style(payload: dict[str, Any], output_path: Path) -> Path:
+    """Use the canonical writer while retaining an existing artifact's byte style.
+
+    ``write_submission`` is the only serializer of decisions.  On Windows it
+    writes CRLF in text mode; keeping an already-LF submission LF avoids a
+    meaningless byte-level diff when the decisions are unchanged.
+    """
+
+    existing = output_path.read_bytes() if output_path.is_file() else b""
+    expects_lf = b"\r\n" not in existing and b"\n" in existing
+    target = write_submission(payload, output_path)
+    if expects_lf:
+        target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n"))
+    return target

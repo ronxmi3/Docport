@@ -5,6 +5,10 @@ output/
 submission.json
 attachments/
 inbox/
+# The frontend has an App Router route named "inbox"; retain that code while
+# still ignoring participant dataset inbox directories everywhere else.
+!frontend/app/inbox/
+!frontend/app/inbox/**
 sample_submission.json
 ground_truth.json
 *.py[cod]

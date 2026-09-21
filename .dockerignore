@@ -1,6 +1,8 @@
 # Source control, environments, and test/runtime caches
 .git/
 .venv/
+frontend/node_modules/
+frontend/.next/
 __pycache__/
 .pytest_cache/
 *.py[cod]
