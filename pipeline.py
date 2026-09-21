@@ -1,348 +1,296 @@
-"""Orchestrates classification, extraction, normalisation, and comparison."""
+"""End-to-end, per-email-safe SDOC processing orchestration."""
 
 from __future__ import annotations
 
-import json
-import re
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+import logging
 import time
-from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Iterable, Mapping
 
 from classifier import classify_email
 from comparator import compare_documents
-from extractor import detect_document_type, extract_document
-from inbox_adapter import coerce_email_record
-from loader import Inbox
-from models import Attachment, EmailRecord, REQUIRED_FIELDS
+from document_handler import select_documents
+from extractor import extract_fields
+from models import (
+    EMAIL_CATEGORIES,
+    Comparison,
+    DocumentSelection,
+    EmailDecision,
+    EmailRecord,
+    REQUIRED_FIELDS,
+    StageTimings,
+)
 from normalizer import normalize_fields
 
 
-def process_inbox(inbox: Iterable[object]) -> dict[str, dict[str, Any]]:
-    """Process every email, including categories that do not need documents."""
-
-    attachment_reader = getattr(inbox, "read_text", None)
-    results: dict[str, dict[str, Any]] = {}
-    for raw_email in inbox:
-        email = coerce_email_record(raw_email, attachment_reader)
-        results[email.email_id] = process_email(email)
-    # Stable key order makes CLI files, regression tests, and future workers
-    # reproducible even if an upstream source changes iteration order.
-    return {email_id: results[email_id] for email_id in sorted(results)}
+LOGGER = logging.getLogger(__name__)
 
 
-def process_email(email: EmailRecord) -> dict[str, Any]:
-    """Run the core pipeline for one email and collect stage timings in ms."""
+@dataclass(frozen=True)
+class PipelineReport:
+    """Deterministic results and aggregate performance information."""
 
-    total_start = time.perf_counter_ns()
+    decisions: Mapping[str, EmailDecision]
+    elapsed_seconds: float
 
-    classification_start = time.perf_counter_ns()
-    classification = classify_email(email)
-    classification_ms = _elapsed_ms(classification_start)
+    @property
+    def processed_count(self) -> int:
+        return len(self.decisions)
 
-    result: dict[str, Any] = {
-        "category": classification.label,
-        "classification_reasons": list(classification.reasons),
-        "processing_status": "skipped",
-        "mismatch_found": None,
-        "comparison": None,
-        "differences": {},
-        "timings_ms": {
-            "classification": classification_ms,
-            "extraction": 0.0,
-            "comparison": 0.0,
-            "total": 0.0,
-        },
-    }
+    @property
+    def comparison_count(self) -> int:
+        return sum(decision.category == "BL_COMPARISON" for decision in self.decisions.values())
 
-    if classification.label != "document_comparison":
-        result["timings_ms"]["total"] = _elapsed_ms(total_start)
-        return result
+    @property
+    def needs_review_count(self) -> int:
+        return sum(decision.status == "NEEDS_REVIEW" for decision in self.decisions.values())
 
-    extraction_start = time.perf_counter_ns()
-    si_attachment, bl_attachment, selection_error = select_si_and_bl(email.attachments)
-    if selection_error:
-        result.update(
-            {
-                "processing_status": "incomplete",
-                "mismatch_found": True,
-                "error": selection_error,
-            }
-        )
-        result["timings_ms"]["extraction"] = _elapsed_ms(extraction_start)
-        result["timings_ms"]["total"] = _elapsed_ms(total_start)
-        return result
-
-    assert si_attachment is not None and bl_attachment is not None
-    si_extraction = extract_document(si_attachment.content, "si")
-    bl_extraction = extract_document(bl_attachment.content, "bl")
-    si_normalized = normalize_fields(si_extraction.fields)
-    bl_normalized = normalize_fields(bl_extraction.fields)
-    result["timings_ms"]["extraction"] = _elapsed_ms(extraction_start)
-
-    comparison_start = time.perf_counter_ns()
-    comparison = compare_documents(si_normalized, bl_normalized)
-    result["timings_ms"]["comparison"] = _elapsed_ms(comparison_start)
-
-    comparison_dict = comparison.to_dict()
-    differences = {
-        field: comparison_dict["fields"][field]
-        for field in comparison.mismatched_fields
-    }
-    result.update(
-        {
-            "processing_status": "completed" if comparison.status != "incomplete" else "incomplete",
-            "mismatch_found": not comparison.is_match,
-            "message": "No mismatch detected" if comparison.is_match else "Mismatch or missing field detected",
-            "comparison": comparison_dict,
-            "differences": differences,
-            # Keeping raw and normalized values provides auditability without
-            # changing the deterministic comparison contract.
-            "documents": {
-                "si": {
-                    "attachment": si_attachment.filename,
-                    "extracted": dict(si_extraction.fields),
-                    "normalized": si_normalized,
-                },
-                "bl": {
-                    "attachment": bl_attachment.filename,
-                    "extracted": dict(bl_extraction.fields),
-                    "normalized": bl_normalized,
-                },
-            },
-        }
-    )
-    result["timings_ms"]["total"] = _elapsed_ms(total_start)
-    return result
+    @property
+    def throughput(self) -> float:
+        return self.processed_count / self.elapsed_seconds if self.elapsed_seconds > 0 else 0.0
 
 
-def select_si_and_bl(
-    attachments: Iterable[Attachment],
-) -> tuple[Attachment | None, Attachment | None, str | None]:
-    """Select exactly one SI and one BL from an email's resolved attachments."""
+def process_records(
+    emails: Iterable[EmailRecord], workers: int = 1, logger: logging.Logger | None = None
+) -> PipelineReport:
+    """Process independent emails concurrently while preserving sorted output.
 
-    attachments = tuple(attachments)
-    si_candidates: list[tuple[int, int, Attachment]] = []
-    bl_candidates: list[tuple[int, int, Attachment]] = []
-    for index, attachment in enumerate(attachments):
-        si_score, bl_score = _document_scores(attachment)
-        if si_score:
-            si_candidates.append((si_score, index, attachment))
-        if bl_score:
-            bl_candidates.append((bl_score, index, attachment))
-
-    si = _highest_unique(si_candidates)
-    bl = _highest_unique(bl_candidates, excluded=si)
-    errors: list[str] = []
-    if si is None:
-        errors.append("Shipping Instruction attachment not found")
-    if bl is None:
-        errors.append("Bill of Lading attachment not found")
-    if si is not None and not si.content:
-        errors.append(f"Shipping Instruction attachment is unreadable: {si.filename}")
-    if bl is not None and not bl.content:
-        errors.append(f"Bill of Lading attachment is unreadable: {bl.filename}")
-    return si, bl, "; ".join(errors) if errors else None
-
-
-def build_submission(
-    results: Mapping[str, Mapping[str, Any]], sample_template: object | None = None
-) -> dict[str, Any]:
-    """Return the default keyed payload or project it onto sample JSON shape.
-
-    The challenge's sample_submission.json is the source of truth for exact
-    field names. Its supplied shape is applied only at this boundary so the
-    processing logic is never coupled to an evaluation-specific schema.
+    Attachments are resolved once by the dataset loader before this function is
+    invoked. Worker tasks only inspect immutable records, so there is no shared
+    mutation or repeated disk/network I/O.
     """
 
-    ordered = {email_id: dict(results[email_id]) for email_id in sorted(results)}
-    if sample_template is None:
-        return ordered
-    return _adapt_to_sample_template(ordered, sample_template)
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+    ordered_emails = tuple(sorted(emails, key=lambda email: email.email_id))
+    if len({email.email_id for email in ordered_emails}) != len(ordered_emails):
+        raise ValueError("Duplicate email_id values cannot be processed safely")
+
+    start = time.perf_counter()
+    selected_logger = logger or LOGGER
+    if workers == 1:
+        decisions = [process_email(email, selected_logger) for email in ordered_emails]
+    else:
+        # executor.map preserves input order, and final key sorting makes output
+        # deterministic even if task scheduling changes between runs.
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="sdoc") as executor:
+            decisions = list(executor.map(lambda email: process_email(email, selected_logger), ordered_emails))
+
+    result_map = {decision.email_id: decision for decision in decisions}
+    stable_map = {email_id: result_map[email_id] for email_id in sorted(result_map)}
+    return PipelineReport(decisions=stable_map, elapsed_seconds=time.perf_counter() - start)
 
 
-def load_sample_template(path: str | Path) -> object:
-    """Load a sample_submission.json file without imposing its shape."""
+def process_email(email: EmailRecord, logger: logging.Logger | None = None) -> EmailDecision:
+    """Process one email without allowing a failure to stop the entire run."""
 
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    selected_logger = logger or LOGGER
+    total_start = time.perf_counter_ns()
+    classification_ms = document_ms = extraction_ms = comparison_ms = 0.0
+    classification = None
+    selection = None
+    si_raw = bl_raw = si_normalized = bl_normalized = None
+    comparison = None
 
+    try:
+        classification_start = time.perf_counter_ns()
+        classification = classify_email(email)
+        classification_ms = _elapsed_ms(classification_start)
 
-def write_submission(payload: Mapping[str, Any], output_path: str | Path) -> Path:
-    """Write deterministic, human-readable JSON and create its parent folder."""
+        if classification.label != "BL_COMPARISON":
+            return _decision(
+                email=email,
+                category=classification.label,
+                classification_reasons=classification.reasons,
+                classification_ms=classification_ms,
+                document_ms=document_ms,
+                extraction_ms=extraction_ms,
+                comparison_ms=comparison_ms,
+                total_start=total_start,
+            )
 
-    target = Path(output_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return target
+        document_start = time.perf_counter_ns()
+        selection = select_documents(email.attachments)
+        document_ms = _elapsed_ms(document_start)
+        if selection.review_reason:
+            return _decision(
+                email=email,
+                category=classification.label,
+                status="NEEDS_REVIEW",
+                review_reason=selection.review_reason,
+                classification_reasons=classification.reasons,
+                selection=selection,
+                classification_ms=classification_ms,
+                document_ms=document_ms,
+                extraction_ms=extraction_ms,
+                comparison_ms=comparison_ms,
+                total_start=total_start,
+            )
 
+        assert selection.si_attachment is not None and selection.bl_attachment is not None
+        extraction_start = time.perf_counter_ns()
+        si_raw = extract_fields(selection.si_attachment.content)
+        bl_raw = extract_fields(selection.bl_attachment.content)
+        si_normalized = normalize_fields(si_raw)
+        bl_normalized = normalize_fields(bl_raw)
+        extraction_ms = _elapsed_ms(extraction_start)
 
-def run_source(
-    source: str | Path,
-    sample_submission_path: str | Path | None = None,
-) -> dict[str, Any]:
-    """Load an Inbox source, process it, and produce a submission payload."""
+        # Do not compare absent or invalid values: that would turn a document
+        # quality problem into a fabricated mismatch.
+        if _has_missing_value(si_normalized) or _has_missing_value(bl_normalized):
+            return _decision(
+                email=email,
+                category=classification.label,
+                status="NEEDS_REVIEW",
+                review_reason="missing_value",
+                classification_reasons=classification.reasons,
+                selection=selection,
+                si_raw=si_raw,
+                bl_raw=bl_raw,
+                si_normalized=si_normalized,
+                bl_normalized=bl_normalized,
+                classification_ms=classification_ms,
+                document_ms=document_ms,
+                extraction_ms=extraction_ms,
+                comparison_ms=comparison_ms,
+                total_start=total_start,
+            )
 
-    inbox = Inbox(source)
-    results = process_inbox(inbox)
-    template = load_sample_template(sample_submission_path) if sample_submission_path else None
-    return build_submission(results, template)
-
-
-def _document_scores(attachment: Attachment) -> tuple[int, int]:
-    """Score explicit SI/BL titles in a filename and document heading."""
-
-    name = attachment.filename.casefold()
-    heading = attachment.content[:1500].casefold()
-    metadata = " ".join(str(value).casefold() for value in attachment.metadata.values())
-    evidence = f"{name}\n{heading}\n{metadata}"
-
-    si_score = 0
-    bl_score = 0
-    if re.search(r"\bshipping\s+instruction(?:s)?\b|\bshipper'?s\s+instruction\b", evidence):
-        si_score += 5
-    if re.search(r"(?:^|[_\-\s])si(?:$|[_\-\s.])", name):
-        si_score += 3
-    if re.search(r"\bbill\s+of\s+lading\b|\bocean\s+bill\b", evidence):
-        bl_score += 5
-    if re.search(r"(?:^|[_\-\s])(?:bl|bol)(?:$|[_\-\s.])", name) or "b/l" in name:
-        bl_score += 3
-
-    detected = detect_document_type(attachment.content, attachment.filename)
-    if detected == "si":
-        si_score += 2
-    elif detected == "bl":
-        bl_score += 2
-    return si_score, bl_score
-
-
-def _highest_unique(
-    candidates: list[tuple[int, int, Attachment]], excluded: Attachment | None = None
-) -> Attachment | None:
-    usable = [candidate for candidate in candidates if candidate[2] is not excluded]
-    if not usable:
-        return None
-    # Filename/content score, then original attachment order is deterministic.
-    usable.sort(key=lambda candidate: (-candidate[0], candidate[1]))
-    return usable[0][2]
-
-
-def _adapt_to_sample_template(
-    results: Mapping[str, Mapping[str, Any]], sample_template: object
-) -> dict[str, Any]:
-    """Handle the documented keyed-by-email sample format conservatively."""
-
-    if not isinstance(sample_template, Mapping):
-        raise ValueError("sample_submission.json must be a JSON object keyed by email_id")
-    prototype = next(iter(sample_template.values()), None)
-    projected: dict[str, Any] = {}
-    for email_id, result in results.items():
-        shape = sample_template.get(email_id, prototype)
-        projected[email_id] = _project_result(result, shape)
-    return projected
-
-
-def _project_result(result: Mapping[str, Any], shape: object) -> Any:
-    """Project known submission aliases while preserving a template's nesting."""
-
-    if shape is None:
-        return dict(result)
-    if isinstance(shape, list):
-        return _project_differences(result, shape)
-    if not isinstance(shape, Mapping):
-        return result.get("mismatch_found")
-
-    output: dict[str, Any] = {}
-    aliases: dict[str, Any] = {
-        "category": result.get("category"),
-        "classification": result.get("category"),
-        "email_category": result.get("category"),
-        "email_type": result.get("category"),
-        "mismatch_found": result.get("mismatch_found"),
-        "mismatch": result.get("mismatch_found"),
-        "mismatch_detected": result.get("mismatch_found"),
-        "has_mismatch": result.get("mismatch_found"),
-        "is_match": (result.get("comparison") or {}).get("is_match"),
-        "status": result.get("processing_status"),
-        "processing_status": result.get("processing_status"),
-        "comparison": result.get("comparison"),
-        "differences": result.get("differences"),
-        "discrepancies": result.get("differences"),
-        "different_fields": result.get("differences"),
-        "mismatch_details": result.get("differences"),
-        "mismatches": result.get("differences"),
-        "mismatched_fields": list(result.get("differences", {}).keys()),
-        "timings_ms": result.get("timings_ms"),
-        "message": result.get("message"),
-    }
-    for key, child_shape in shape.items():
-        if key in {"differences", "discrepancies", "different_fields", "mismatch_details", "mismatches", "mismatched_fields"}:
-            output[key] = _project_differences(result, child_shape)
-        elif key == "comparison":
-            output[key] = _project_comparison(result.get("comparison"), child_shape)
-        elif key in aliases:
-            output[key] = aliases[key]
-        elif key in result:
-            output[key] = result[key]
-        elif key in REQUIRED_FIELDS:
-            output[key] = (result.get("comparison") or {}).get("fields", {}).get(key)
-        else:
-            # Keep a template-only field explicit rather than inserting a
-            # fabricated value. This makes a new official schema easy to spot.
-            output[key] = None
-    return output
-
-
-def _project_differences(result: Mapping[str, Any], shape: object) -> Any:
-    """Render differing fields as either a map or a sample-shaped list."""
-
-    differences = result.get("differences", {})
-    if not isinstance(differences, Mapping):
-        differences = {}
-    if isinstance(shape, list):
-        if not differences:
-            return []
-        if not shape or not isinstance(shape[0], Mapping):
-            return [dict(detail) for detail in differences.values()]
-        return [
-            _project_difference(field, detail, shape[0])
-            for field, detail in differences.items()
-        ]
-    if isinstance(shape, Mapping):
-        return dict(differences)
-    return bool(differences)
-
-
-def _project_difference(field: str, detail: object, shape: Mapping[str, Any]) -> dict[str, Any]:
-    """Map common SI/BL field-detail aliases in a list-shaped sample schema."""
-
-    source = detail if isinstance(detail, Mapping) else {}
-    values = {
-        "field": field,
-        "field_name": field,
-        "label": source.get("label"),
-        "si": source.get("si"),
-        "si_value": source.get("si"),
-        "expected": source.get("si"),
-        "bl": source.get("bl"),
-        "bl_value": source.get("bl"),
-        "actual": source.get("bl"),
-        "status": source.get("status"),
-        "match": source.get("match"),
-    }
-    return {key: values.get(key) for key in shape}
+        comparison_start = time.perf_counter_ns()
+        comparison = compare_documents(si_normalized, bl_normalized)
+        comparison_ms = _elapsed_ms(comparison_start)
+        if comparison.is_match:
+            return _decision(
+                email=email,
+                category=classification.label,
+                status="OK",
+                classification_reasons=classification.reasons,
+                selection=selection,
+                si_raw=si_raw,
+                bl_raw=bl_raw,
+                si_normalized=si_normalized,
+                bl_normalized=bl_normalized,
+                comparison=comparison,
+                classification_ms=classification_ms,
+                document_ms=document_ms,
+                extraction_ms=extraction_ms,
+                comparison_ms=comparison_ms,
+                total_start=total_start,
+            )
+        return _decision(
+            email=email,
+            category=classification.label,
+            status="MISMATCH",
+            has_defect=True,
+            defect_fields=tuple(comparison.mismatched_fields),
+            classification_reasons=classification.reasons,
+            selection=selection,
+            si_raw=si_raw,
+            bl_raw=bl_raw,
+            si_normalized=si_normalized,
+            bl_normalized=bl_normalized,
+            comparison=comparison,
+            classification_ms=classification_ms,
+            document_ms=document_ms,
+            extraction_ms=extraction_ms,
+            comparison_ms=comparison_ms,
+            total_start=total_start,
+        )
+    except Exception as exc:  # per-email boundary: never lose the whole inbox
+        selected_logger.exception("Email %s failed safely: %s", email.email_id, exc)
+        category = classification.label if classification and classification.label in EMAIL_CATEGORIES else "GENERAL"
+        if category == "BL_COMPARISON":
+            return _decision(
+                email=email,
+                category=category,
+                status="NEEDS_REVIEW",
+                review_reason="unreadable",
+                classification_reasons=classification.reasons if classification else (),
+                selection=selection,
+                si_raw=si_raw,
+                bl_raw=bl_raw,
+                si_normalized=si_normalized,
+                bl_normalized=bl_normalized,
+                comparison=comparison,
+                classification_ms=classification_ms,
+                document_ms=document_ms,
+                extraction_ms=extraction_ms,
+                comparison_ms=comparison_ms,
+                total_start=total_start,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+        return _decision(
+            email=email,
+            category=category,
+            classification_reasons=classification.reasons if classification else (),
+            classification_ms=classification_ms,
+            document_ms=document_ms,
+            extraction_ms=extraction_ms,
+            comparison_ms=comparison_ms,
+            total_start=total_start,
+            error=f"{type(exc).__name__}: {exc}",
+        )
 
 
-def _project_comparison(comparison: object, shape: object) -> Any:
-    """Keep an empty template useful while respecting known nested keys."""
+def process_inbox(inbox: Iterable[EmailRecord], workers: int = 1) -> dict[str, dict[str, object]]:
+    """Compatibility wrapper returning serialisable diagnostics by email ID."""
 
-    if not isinstance(comparison, Mapping) or not isinstance(shape, Mapping) or not shape:
-        return comparison
-    values = {
-        "status": comparison.get("status"),
-        "is_match": comparison.get("is_match"),
-        "mismatched_fields": comparison.get("mismatched_fields"),
-        "fields": comparison.get("fields"),
-    }
-    return {key: values.get(key) for key in shape}
+    report = process_records(inbox, workers=workers)
+    return {email_id: decision.to_debug_dict() for email_id, decision in report.decisions.items()}
+
+
+def _has_missing_value(values: Mapping[str, str | None]) -> bool:
+    return any(values.get(field) is None for field in REQUIRED_FIELDS)
+
+
+def _decision(
+    *,
+    email: EmailRecord,
+    category: str,
+    status: str | None = None,
+    has_defect: bool = False,
+    defect_fields: tuple[str, ...] = (),
+    review_reason: str | None = None,
+    classification_reasons: tuple[str, ...] = (),
+    selection: DocumentSelection | None = None,
+    si_raw: Mapping[str, str | None] | None = None,
+    bl_raw: Mapping[str, str | None] | None = None,
+    si_normalized: Mapping[str, str | None] | None = None,
+    bl_normalized: Mapping[str, str | None] | None = None,
+    comparison: Comparison | None = None,
+    classification_ms: float = 0.0,
+    document_ms: float = 0.0,
+    extraction_ms: float = 0.0,
+    comparison_ms: float = 0.0,
+    total_start: int,
+    error: str | None = None,
+) -> EmailDecision:
+    """Centralise safe result construction so semantics never drift by branch."""
+
+    return EmailDecision(
+        email_id=email.email_id,
+        category=category,
+        status=status,
+        has_defect=has_defect,
+        defect_fields=defect_fields,
+        review_reason=review_reason,
+        classification_reasons=classification_reasons,
+        selection=selection,
+        si_extracted=si_raw,
+        bl_extracted=bl_raw,
+        si_normalized=si_normalized,
+        bl_normalized=bl_normalized,
+        comparison=comparison,
+        timings=StageTimings(
+            classification_ms=classification_ms,
+            document_handling_ms=document_ms,
+            extraction_ms=extraction_ms,
+            comparison_ms=comparison_ms,
+            total_ms=_elapsed_ms(total_start),
+        ),
+        error=error,
+    )
 
 
 def _elapsed_ms(start_ns: int) -> float:

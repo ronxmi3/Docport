@@ -11,12 +11,12 @@ from models import Attachment, EmailRecord
             "Please compare SI and BL",
             "Verify the two documents before release.",
             (Attachment("SI.txt", ""), Attachment("BL.txt", "")),
-            "document_comparison",
+            "BL_COMPARISON",
         ),
-        ("New SI request", "Please prepare a new SI.", (), "new_si_request"),
-        ("Invoice query", "Please clarify this payment.", (), "invoice_query"),
-        ("Holiday notice", "Our office is closed.", (), "general"),
-        ("You have won a lottery", "Click here to claim.", (), "spam"),
+        ("New SI request", "Please prepare a new SI.", (), "SI_REQUEST"),
+        ("Invoice query", "Please clarify this payment.", (), "INVOICE_QUERY"),
+        ("Holiday notice", "Our office is closed.", (), "GENERAL"),
+        ("You have won a lottery", "Click here to claim.", (), "SPAM"),
     ],
 )
 def test_classifier_covers_all_required_categories(

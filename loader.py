@@ -17,6 +17,8 @@ from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
 from models import Attachment, EmailRecord
+from pdf_text import extract_pdf_text
+from xlsx_text import extract_xlsx_text
 
 
 class Inbox:
@@ -37,7 +39,10 @@ class Inbox:
         payload = self._load_payload(source)
         raw_emails = _extract_email_list(payload)
         self._build_attachment_index(payload)
-        self._emails = [coerce_email_record(raw, self.read_text, self._attachment_index) for raw in raw_emails]
+        self._emails = [
+            coerce_email_record(raw, self.read_text, self._attachment_index, self.read_bytes)
+            for raw in raw_emails
+        ]
 
     def __iter__(self) -> Iterator[EmailRecord]:
         return iter(self._emails)
@@ -51,41 +56,55 @@ class Inbox:
 
         return tuple(self._emails)
 
-    def read_text(self, reference: object) -> str:
-        """Resolve a plain-text attachment reference to text.
+    def read_bytes(self, reference: object) -> bytes:
+        """Resolve an attachment reference to raw bytes.
 
-        It intentionally raises a useful exception for unreadable files. The
-        pipeline catches those per email and records an incomplete result rather
-        than losing the rest of the inbox.
+        This mirrors the official participant loader's interface. PDF handling
+        consumes these bytes with pypdf, while ``read_text`` below remains the
+        unchanged path for text attachments.
         """
-
         if isinstance(reference, Mapping):
+            for key in ("content_base64", "base64", "data_base64"):
+                value = reference.get(key)
+                if value is not None:
+                    try:
+                        return base64.b64decode(str(value))
+                    except ValueError:
+                        break
             inline = _inline_attachment_text(reference)
             if inline is not None:
-                return inline
+                return inline.encode("utf-8")
             reference = _first_present(reference, "path", "file_path", "file", "attachment_path", "url", "id")
         if reference is None:
-            raise ValueError("Attachment has no readable content or path")
+            raise ValueError("Attachment has no readable bytes or path")
         reference_text = str(reference)
 
         if reference_text in self._attachment_index:
             entry = self._attachment_index[reference_text]
             if entry is not reference:
-                return self.read_text(entry)
+                return self.read_bytes(entry)
 
         if reference_text.startswith(("http://", "https://")):
             with urlopen(reference_text, timeout=20) as response:  # nosec B310 - user-supplied challenge source
-                return response.read().decode("utf-8", errors="replace")
+                return response.read()
 
         if self.source.startswith(("http://", "https://")):
             attachment_url = urljoin(self.source.rstrip("/") + "/", reference_text)
             with urlopen(attachment_url, timeout=20) as response:  # nosec B310 - local challenge service
-                return response.read().decode("utf-8", errors="replace")
+                return response.read()
 
         for candidate in self._local_candidates(reference_text):
             if candidate.is_file():
-                return candidate.read_text(encoding="utf-8", errors="replace")
+                return candidate.read_bytes()
         raise FileNotFoundError(f"Unable to resolve attachment: {reference_text}")
+
+    def read_text(self, reference: object, encoding: str = "utf-8") -> str:
+        """Resolve a text attachment while keeping binary access available."""
+
+        # ``Path.read_text`` previously used universal-newline mode. Preserve
+        # that TXT behavior after routing through ``read_bytes`` for PDF work.
+        text = self.read_bytes(reference).decode(encoding, errors="replace")
+        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     def submit(self, payload: Mapping[str, Any]) -> Any:
         """POST a result only when this inbox was created from an HTTP source."""
@@ -183,6 +202,7 @@ def coerce_email_record(
     raw_email: object,
     attachment_reader: Callable[[object], str] | None = None,
     attachment_index: Mapping[str, Any] | None = None,
+    attachment_bytes_reader: Callable[[object], bytes] | None = None,
 ) -> EmailRecord:
     """Adapt dict- or attribute-shaped challenge email records to ``EmailRecord``."""
 
@@ -230,7 +250,8 @@ def coerce_email_record(
         raw_attachments.extend(attachment_index.get(str(item), item) for item in attachment_ids)
 
     attachments = tuple(
-        _coerce_attachment(item, attachment_reader, attachment_index) for item in raw_attachments
+        _coerce_attachment(item, attachment_reader, attachment_index, attachment_bytes_reader)
+        for item in raw_attachments
     )
     metadata = dict(raw_email) if isinstance(raw_email, Mapping) else {}
     return EmailRecord(
@@ -247,6 +268,7 @@ def _coerce_attachment(
     raw_attachment: object,
     attachment_reader: Callable[[object], str] | None,
     attachment_index: Mapping[str, Any] | None,
+    attachment_bytes_reader: Callable[[object], bytes] | None = None,
 ) -> Attachment:
     if isinstance(raw_attachment, Attachment):
         return raw_attachment
@@ -259,28 +281,78 @@ def _coerce_attachment(
         filename = filename or Path(raw_attachment).name
         source = source or raw_attachment
     filename = str(filename or source or "unnamed_attachment.txt")
+    source_reference = source if source is not None else raw_attachment
+    metadata = dict(_mapping_metadata(raw_attachment))
 
-    inline = _inline_attachment_text(raw_attachment) if isinstance(raw_attachment, Mapping) else None
-    if inline is not None:
-        content = inline
-    elif attachment_reader is not None:
-        try:
-            content = str(attachment_reader(source if source is not None else raw_attachment))
-        except Exception as exc:  # kept as metadata so one bad file does not stop an inbox run
-            content = ""
-            return Attachment(
-                filename=filename,
-                content=content,
-                source=str(source) if source is not None else None,
-                metadata={"read_error": str(exc), **_mapping_metadata(raw_attachment)},
+    suffix = Path(filename).suffix.casefold()
+    if suffix == ".pdf":
+        if attachment_bytes_reader is None:
+            return _unreadable_attachment(
+                filename, source, metadata, "PDF extraction requires an attachment bytes reader"
             )
+        try:
+            content = extract_pdf_text(attachment_bytes_reader(source_reference))
+        except Exception as exc:  # a failed PDF read is local to this attachment
+            return _unreadable_attachment(filename, source, metadata, str(exc), source_format="PDF")
+        metadata.update({"source_format": "PDF", "extraction": "embedded text"})
+    elif suffix in {".xlsx", ".xlsm"}:
+        if attachment_bytes_reader is None:
+            return _unreadable_attachment(
+                filename,
+                source,
+                metadata,
+                "Excel extraction requires an attachment bytes reader",
+                source_format=suffix.removeprefix(".").upper(),
+            )
+        try:
+            content = extract_xlsx_text(attachment_bytes_reader(source_reference))
+        except Exception as exc:  # a broken workbook belongs only to this email
+            return _unreadable_attachment(
+                filename, source, metadata, str(exc), source_format=suffix.removeprefix(".").upper()
+            )
+        metadata.update({"source_format": suffix.removeprefix(".").upper(), "extraction": "openpyxl"})
     else:
-        content = ""
+        inline = _inline_attachment_text(raw_attachment) if isinstance(raw_attachment, Mapping) else None
+        if inline is not None:
+            content = inline
+        elif attachment_reader is not None:
+            try:
+                content = str(attachment_reader(source_reference))
+            except Exception as exc:  # kept as metadata so one bad file does not stop an inbox run
+                return _unreadable_attachment(filename, source, metadata, str(exc))
+        else:
+            content = ""
+        if suffix == ".txt":
+            metadata.setdefault("source_format", "TXT")
+            metadata.setdefault("extraction", "plain text")
+
     return Attachment(
         filename=filename,
         content=content,
         source=str(source) if source is not None else None,
-        metadata=_mapping_metadata(raw_attachment),
+        metadata=metadata,
+    )
+
+
+def _unreadable_attachment(
+    filename: str,
+    source: object | None,
+    metadata: Mapping[str, Any],
+    error: str,
+    source_format: str | None = None,
+) -> Attachment:
+    """Keep attachment-load errors local to the email that owns them."""
+
+    updated_metadata = dict(metadata)
+    if source_format:
+        updated_metadata["source_format"] = source_format
+    updated_metadata["extraction"] = "unreadable"
+    updated_metadata["read_error"] = error
+    return Attachment(
+        filename=filename,
+        content="",
+        source=str(source) if source is not None else None,
+        metadata=updated_metadata,
     )
 
 

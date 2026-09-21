@@ -51,3 +51,20 @@ def test_comparison_reports_si_and_bl_values_in_canonical_order() -> None:
     assert comparison.fields["container_count"].bl_value == "4"
     assert comparison.fields["gross_weight_kg"].status == "missing_in_bl"
     assert tuple(comparison.fields) == REQUIRED_FIELDS
+
+
+def test_comparison_reports_exact_multiple_canonical_defect_names() -> None:
+    si = _reference_fields()
+    bl = dict(si)
+    bl["shipper"] = "other exporter"
+    bl["port_of_discharge"] = "rotterdam"
+    bl["container_count"] = "4"
+
+    comparison = compare_documents(si, bl)
+
+    assert comparison.status == "mismatch"
+    assert comparison.mismatched_fields == [
+        "shipper",
+        "port_of_discharge",
+        "container_count",
+    ]

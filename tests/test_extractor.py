@@ -51,3 +51,53 @@ No. of Packages: 1000 CTNS
 
     missing = extract_fields("No form labels are present here.")
     assert all(value is None for value in missing.values())
+
+
+def test_label_aliases_map_to_the_same_canonical_fields() -> None:
+    fields = extract_fields(
+        """Shipper Name and Address: Acme Ltd.
+Consigned To: Beta Inc.
+Party to Notify: Beta Inc.
+Load Port: Singapore
+POD: Rotterdam
+Number of Containers: 03
+Total Gross Weight: 7,000 KG
+"""
+    )
+
+    assert fields["shipper"] == "Acme Ltd."
+    assert fields["consignee"] == "Beta Inc."
+    assert fields["notify_party"] == "Beta Inc."
+    assert fields["port_of_loading"] == "Singapore"
+    assert fields["port_of_discharge"] == "Rotterdam"
+    assert fields["container_count"] == "03"
+    assert fields["gross_weight_kg"] == "7,000 KG"
+
+
+def test_extracts_parenthesized_and_translated_form_label_variants() -> None:
+    fields = extract_fields(
+        """Shipper (Principal or Seller): Acme Ltd.
+Consignee (Non-Negotiable): Beta Inc.
+Notify Party/Intermediate Consignee: Gamma Inc.
+Port of Loading (POL): Port Klang
+Port of Discharge (POD): Rotterdam
+No. of Containers or Packages: 1 x 40HC
+Gross Weight毛重(KGS): 21,577 KG
+"""
+    )
+
+    assert fields == {
+        "shipper": "Acme Ltd.",
+        "consignee": "Beta Inc.",
+        "notify_party": "Gamma Inc.",
+        "port_of_loading": "Port Klang",
+        "port_of_discharge": "Rotterdam",
+        "container_count": "1 x 40HC",
+        "gross_weight_kg": "21,577 KG",
+    }
+
+
+def test_to_the_order_of_is_a_consignee_alias() -> None:
+    fields = extract_fields("To the Order of: Beta Imports Inc.")
+
+    assert fields["consignee"] == "Beta Imports Inc."

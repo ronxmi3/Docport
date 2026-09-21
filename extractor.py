@@ -17,44 +17,64 @@ from models import Extraction, REQUIRED_FIELDS
 # first when two aliases overlap (for example "notify party" and "notify").
 LABEL_PATTERNS: dict[str, tuple[str, ...]] = {
     "shipper": (
+        r"shipper\s*\(\s*principal\s+or\s+seller\s*\)",
+        r"shipper\s*(?:name\s*(?:and|&)\s*address)?",
         r"shipper(?:\s*(?:name|details|address))?",
         r"shipper\s*/\s*exporter",
         r"exporter",
         r"sender",
     ),
     "consignee": (
+        r"consignee\s*\(\s*non[-\s]?negotiable\s*\)",
+        r"consignee\s*(?:name\s*(?:and|&)\s*address)?",
         r"consignee(?:\s*(?:name|details|address))?",
         r"consigned\s+to",
+        r"to\s+the\s+order\s+of",
         r"receiver",
     ),
     "notify_party": (
+        r"notify\s+party\s*/\s*intermediate\s+consignee",
+        r"notify\s+party\s*(?:name\s*(?:and|&)\s*address)?",
         r"notify\s+party(?:\s*(?:name|details|address))?",
         r"party\s+to\s+notify",
         r"notify(?:\s+address)?",
     ),
     "port_of_loading": (
+        r"port\s+of\s+loading\s*\(\s*pol\s*\)",
         r"port\s+of\s+loading",
         r"load(?:ing)?\s+port",
+        r"port\s+of\s+load",
+        r"place\s+of\s+loading",
         r"port\s+load",
         r"p\.?\s*o\.?\s*l\.?",
         r"pol",
     ),
     "port_of_discharge": (
+        r"port\s+of\s+discharge\s*\(\s*pod\s*\)",
         r"port\s+of\s+discharge",
         r"port\s+of\s+unloading",
         r"discharge\s+port",
         r"unloading\s+port",
+        r"place\s+of\s+discharge",
         r"p\.?\s*o\.?\s*d\.?",
         r"pod",
     ),
     "container_count": (
+        r"(?:no\.?|number)\s*of\s*containers?\s+or\s+packages?",
         r"total\s+(?:no\.?|number)?\s*of\s*containers?",
+        r"number\s+of\s+containers?",
         r"(?:no\.?|number)\s*of\s*containers?",
         r"container\s+count",
         r"total\s+containers?",
         r"containers?",
     ),
     "gross_weight_kg": (
+        # Some supplied forms place a translated token immediately after
+        # "Gross Weight" (for example ``Gross Weight毛重(KGS)``). Keep that
+        # token inside the label so the value still begins at the colon.
+        r"gross\s+weight[^\s:()]*\s*\(\s*kg(?:s)?\s*\)",
+        r"gross\s+(?:weight|wt\.?)\s*\([^)]*\)",
+        r"gross\s+weight\s*(?:\(?\s*kg(?:s)?\s*\)?)?",
         r"total\s+gross\s+weight",
         r"gross\s+(?:weight|wt\.?)",
         r"g\.?\s*w\.?",
