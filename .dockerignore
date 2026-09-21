@@ -1,12 +1,63 @@
+# Source control, environments, and test/runtime caches
 .git/
 .venv/
 __pycache__/
 .pytest_cache/
+*.py[cod]
+coverage/
+.coverage
+
+# Generated artifacts and temporary files
 output/
+tmp/
+*.log
+*.pdf
+
+# Participant/scoring data is mounted at runtime, never built into an image.
 attachments/
 inbox/
+sample_submission.json
 ground_truth.json
-*.py[cod]
-tests/
-examples/
-README.md
+**/ground_truth.json
+sdoc-hackathon-bundle/
+**/sdoc-hackathon-bundle/
+*.xlsx
+*.xlsm
+*.docx
+
+# Common secret material
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Include only the explicitly reviewed demo dataset in the runtime build. This
+# comes after broad binary/data exclusions above, then re-excludes forbidden
+# material so an accidental scorer, answer key, secret, or report cannot slip
+# into the image.
+!demo_data/
+!demo_data/**
+demo_data/**/ground_truth.json
+demo_data/**/ground_truth.*
+demo_data/**/scorer/
+demo_data/**/scorer/**
+demo_data/**/score/
+demo_data/**/score/**
+demo_data/**/secrets/
+demo_data/**/secrets/**
+demo_data/**/.env
+demo_data/**/.env.*
+demo_data/**/output/
+demo_data/**/output/**
+demo_data/**/reports/
+demo_data/**/reports/**
+demo_data/**/*.pem
+demo_data/**/*.key
+demo_data/**/*.p12
+demo_data/**/*.pfx
+demo_data/**/*.crt

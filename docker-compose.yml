@@ -1,0 +1,23 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output:/output
+    environment:
+      AVERIS_SOURCE: /demo_data
+      AVERIS_OUTPUT: /output/submission.json
+      AVERIS_REPORT: /output/decision_report.pdf
+      AVERIS_CORS_ORIGINS: http://localhost:3000
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api

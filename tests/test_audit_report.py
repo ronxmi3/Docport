@@ -169,3 +169,23 @@ def test_rendering_report_does_not_change_submission_payload(tmp_path) -> None:
     )
 
     assert build_submission(report.decisions, template) == before
+
+
+def test_report_keeps_final_heading_and_first_explanation_block_together(tmp_path) -> None:
+    """Pagination must not leave the decision/explanation headings orphaned."""
+
+    root, dataset, report = _run_bundle(
+        tmp_path,
+        {"email_001": _comparison_email()},
+        {"shipment_si.txt": SI_TEXT, "shipment_bl.txt": BL_TEXT},
+    )
+    assert root.is_dir()
+    result = write_decision_audit_report(
+        tmp_path / "pagination.pdf", dataset.emails, report.decisions, runtime_seconds=0.1, throughput=10.0
+    )
+
+    page_texts = [page.extract_text() or "" for page in PdfReader(str(result.path)).pages]
+    final_page = next(text for text in page_texts if "Final decision" in text)
+    assert "Final status" in final_page
+    assert "Human-readable explanation" in final_page
+    assert "EMAIL: email_001" in final_page

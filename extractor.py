@@ -82,7 +82,10 @@ LABEL_PATTERNS: dict[str, tuple[str, ...]] = {
 }
 
 _DOCUMENT_TITLES = {
-    "si": re.compile(r"\b(?:shipping\s+instruction|shipper'?s\s+instruction|\bsi\b)\b", re.I),
+    "si": re.compile(
+        r"\b(?:shipping\s+instruction|shipper'?s\s+instruction|bill\s+of\s+lading\s+instruction|bl\s+instruction|b\s*/\s*l\s+instruction|\bsi\b)\b",
+        re.I,
+    ),
     "bl": re.compile(r"\b(?:bill\s+of\s+lading|ocean\s+bill|\bb\s*/\s*l\b|\bbol\b)\b", re.I),
 }
 
@@ -150,6 +153,10 @@ def detect_document_type(text: str, filename: str = "") -> str | None:
     evidence = f"{filename}\n{text[:1500]}"
     si_found = bool(_DOCUMENT_TITLES["si"].search(evidence))
     bl_found = bool(_DOCUMENT_TITLES["bl"].search(evidence))
+    # An instruction-style title can legitimately contain "Bill of Lading";
+    # it identifies the SI that feeds the BL, not a draft BL itself.
+    if re.search(r"\b(?:bill\s+of\s+lading|bl|b\s*/\s*l)\s+instruction\b", evidence, re.I):
+        return "si"
     if si_found and not bl_found:
         return "si"
     if bl_found and not si_found:

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from models import Attachment, EmailRecord
+from docx_text import extract_docx_text
 from pdf_text import extract_pdf_text
 from xlsx_text import extract_xlsx_text
 
@@ -117,6 +118,16 @@ def coerce_attachment(
         except Exception as exc:  # a failed PDF read is local to this attachment
             return _unreadable_attachment(filename, source, metadata, str(exc), source_format="PDF")
         metadata.update({"source_format": "PDF", "extraction": "embedded text"})
+    elif suffix == ".docx":
+        if attachment_bytes_reader is None:
+            return _unreadable_attachment(
+                filename, source, metadata, "DOCX extraction requires an attachment bytes reader", source_format="DOCX"
+            )
+        try:
+            content = extract_docx_text(attachment_bytes_reader(source_reference))
+        except Exception as exc:  # a failed Word read is local to this attachment
+            return _unreadable_attachment(filename, source, metadata, str(exc), source_format="DOCX")
+        metadata.update({"source_format": "DOCX", "extraction": "python-docx"})
     elif suffix in {".xlsx", ".xlsm"}:
         if attachment_bytes_reader is None:
             return _unreadable_attachment(

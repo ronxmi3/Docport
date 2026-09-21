@@ -1,4 +1,6 @@
-from extractor import extract_fields
+import pytest
+
+from extractor import detect_document_type, extract_fields
 
 
 DOCUMENT_TEXT = """SHIPPING INSTRUCTION
@@ -101,3 +103,16 @@ def test_to_the_order_of_is_a_consignee_alias() -> None:
     fields = extract_fields("To the Order of: Beta Imports Inc.")
 
     assert fields["consignee"] == "Beta Imports Inc."
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("BILL OF LADING INSTRUCTION", "si"),
+        ("BL INSTRUCTION", "si"),
+        ("B/L INSTRUCTION", "si"),
+        ("BILL OF LADING", "bl"),
+    ),
+)
+def test_document_type_detection_treats_instruction_titles_as_si(text: str, expected: str) -> None:
+    assert detect_document_type(text) == expected

@@ -136,6 +136,32 @@ def test_missing_required_value_becomes_needs_review(tmp_path) -> None:
     assert decision.defect_fields == ()
 
 
+@pytest.mark.parametrize(
+    ("source_value", "placeholder"),
+    (
+        ("Load Port: Shanghai, China", "Load Port: TBA"),
+        ("Discharge Port: Los Angeles, USA", "Discharge Port: to be confirmed"),
+        ("Consignee: BETA IMPORTS INCORPORATED", "Consignee: N/A"),
+        ("Notify Party: Beta Imports Incorporated", "Notify Party: unknown"),
+        ("Containers: 3 containers", "Containers: NIL"),
+        ("Gross Weight KG: 12,500 KGS", "Gross Weight KG: ____MT"),
+    ),
+)
+def test_placeholder_required_values_become_needs_review(tmp_path, source_value, placeholder) -> None:
+    incomplete_bl = BL_TEXT.replace(source_value, placeholder)
+    _, _, report = _run_bundle(
+        tmp_path,
+        {"email_001": _comparison_email()},
+        {"shipment_si.txt": SI_TEXT, "shipment_bl.txt": incomplete_bl},
+    )
+
+    decision = report.decisions["email_001"]
+    assert decision.status == "NEEDS_REVIEW"
+    assert decision.review_reason == "missing_value"
+    assert decision.has_defect is False
+    assert decision.defect_fields == ()
+
+
 def test_parallel_processing_has_deterministic_semantic_output(tmp_path) -> None:
     emails = {
         f"email_{number:03d}": _comparison_email(f"si_{number}.txt", f"bl_{number}.txt")

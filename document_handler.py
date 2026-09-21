@@ -12,9 +12,12 @@ from models import Attachment, DocumentAssessment, DocumentSelection
 _SI_CONTENT_PATTERNS = (
     (re.compile(r"\bshipping\s+instructions?\b", re.I), "content heading: shipping instruction"),
     (re.compile(r"\bshipper'?s\s+instructions?\b", re.I), "content heading: shipper instruction"),
-    # Many carrier templates label the instruction form "BL INSTRUCTION".
-    # This is the instruction that feeds a BL, not a draft bill itself.
+    # Carrier templates also use BILL OF LADING INSTRUCTION, BL INSTRUCTION,
+    # and B/L INSTRUCTION for the instructions that feed a draft BL.  These
+    # are SI documents, even though they contain the phrase "bill of lading".
+    (re.compile(r"\bbill\s+of\s+lading\s+instructions?\b", re.I), "content heading: bill of lading instruction"),
     (re.compile(r"\bbl\s+instructions?\b", re.I), "content heading: BL instruction"),
+    (re.compile(r"\bb\s*/\s*l\s+instructions?\b", re.I), "content heading: B/L instruction"),
 )
 _BL_CONTENT_PATTERNS = (
     (re.compile(r"\bbill\s+of\s+lading\b", re.I), "content heading: bill of lading"),
@@ -31,12 +34,11 @@ _OTHER_DOCUMENT_TITLE_PATTERNS = (
 _SI_FILENAME = re.compile(r"(?:^|[_\-\s.])(?:si|shipping[_\-\s]?instruction)(?:$|[_\-\s.])", re.I)
 _BL_FILENAME = re.compile(r"(?:^|[_\-\s.])(?:bl|bol|bill[_\-\s]?of[_\-\s]?lading)(?:$|[_\-\s.])", re.I)
 
-# PDFs with usable embedded text and XLSX/XLSM workbooks with cell values are
-# converted before they reach this stage. Other Office/image formats still need
-# a future parser or OCR layer, so arbitrary binary bytes must never look
-# readable here.
+# PDFs, DOCX files, and XLSX/XLSM workbooks with usable text are converted
+# before they reach this stage. Other Office/image formats still need a future
+# parser or OCR layer, so arbitrary binary bytes must never look readable here.
 _UNSUPPORTED_BINARY_SUFFIXES = {
-    ".doc", ".docx", ".xls", ".png", ".jpg", ".jpeg", ".tif", ".tiff",
+    ".doc", ".xls", ".png", ".jpg", ".jpeg", ".tif", ".tiff",
 }
 
 
@@ -61,14 +63,22 @@ def assess_attachment(attachment: Attachment) -> DocumentAssessment:
 
     # Content is intentionally weighted above filenames: a mislabeled file
     # should be diagnosed from its actual document title where possible.
+    instruction_style_si = False
     for pattern, label in _SI_CONTENT_PATTERNS:
         if pattern.search(heading):
-            si_score += 10
+            # An instruction-style title is definitive SI evidence and must
+            # win over the generic "BILL OF LADING" phrase within it.
+            is_bl_instruction = "instruction" in label and (
+                "bill of lading" in label or "BL instruction" in label or "B/L instruction" in label
+            )
+            si_score += 14 if is_bl_instruction else 10
+            instruction_style_si = instruction_style_si or is_bl_instruction
             reasons.append(label)
-    for pattern, label in _BL_CONTENT_PATTERNS:
-        if pattern.search(heading):
-            bl_score += 10
-            reasons.append(label)
+    if not instruction_style_si:
+        for pattern, label in _BL_CONTENT_PATTERNS:
+            if pattern.search(heading):
+                bl_score += 10
+                reasons.append(label)
     other_document = False
     for pattern, label in _OTHER_DOCUMENT_TITLE_PATTERNS:
         if pattern.search(heading):

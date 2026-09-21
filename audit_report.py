@@ -173,9 +173,9 @@ def _summary_story(
 def _email_story(email: EmailRecord, decision: EmailDecision, styles: Mapping[str, ParagraphStyle]) -> list[object]:
     """Render one audit section solely from stored email and decision objects."""
 
-    story: list[object] = [
-        _paragraph(f"Email audit: {email.email_id}", styles["Heading"]),
-        _styled_table(
+    # Keep headings with their immediate context, but leave large tables as
+    # normal flowables so ReportLab can split them cleanly between pages.
+    identity_table = _styled_table(
             [
                 [_paragraph("<b>Email ID</b>", styles["TableCell"]), _paragraph(email.email_id, styles["TableCell"])],
                 [_paragraph("<b>Subject</b>", styles["TableCell"]), _paragraph(_value(email.subject), styles["TableCell"])],
@@ -183,9 +183,16 @@ def _email_story(email: EmailRecord, decision: EmailDecision, styles: Mapping[st
                 [_paragraph("<b>Classification evidence</b>", styles["TableCell"]), _paragraph(_joined(decision.classification_reasons), styles["TableCell"])],
             ],
             [1.6 * inch, _PAGE_WIDTH - (1.6 * inch)],
+        )
+    story: list[object] = [
+        KeepTogether(
+            [
+                _paragraph(f"Email audit: {email.email_id}", styles["Heading"]),
+                identity_table,
+                Spacer(1, 0.12 * inch),
+                _paragraph("Attachments and document identification", styles["HeadingSmall"]),
+            ]
         ),
-        Spacer(1, 0.12 * inch),
-        _paragraph("Attachments and document identification", styles["HeadingSmall"]),
         _attachment_table(email, decision, styles),
     ]
     if decision.category == "BL_COMPARISON":
@@ -196,8 +203,8 @@ def _email_story(email: EmailRecord, decision: EmailDecision, styles: Mapping[st
                 _field_table(decision, styles),
             ]
         )
-    story.extend(
-        [
+    explanation_blocks = _explanation_blocks(format_email_explanation(email, decision), styles["Explanation"])
+    final_section: list[object] = [
             Spacer(1, 0.12 * inch),
             _paragraph("Final decision", styles["HeadingSmall"]),
             _styled_table(
@@ -210,9 +217,15 @@ def _email_story(email: EmailRecord, decision: EmailDecision, styles: Mapping[st
             ),
             Spacer(1, 0.12 * inch),
             _paragraph("Human-readable explanation", styles["HeadingSmall"]),
-            _explanation_paragraph(format_email_explanation(email, decision), styles["Explanation"]),
-        ]
-    )
+    ]
+    # The first stored explanation block (email ID/subject) belongs with the
+    # decision summary.  The middle of a long explanation remains one normal
+    # Paragraph to avoid adding artificial vertical gaps at every heading.
+    if explanation_blocks:
+        final_section.append(explanation_blocks[0])
+    story.append(KeepTogether(final_section))
+    for block in explanation_blocks[1:]:
+        story.extend((Spacer(1, 0.04 * inch), block))
     return story
 
 
@@ -283,8 +296,8 @@ def _build_styles() -> dict[str, ParagraphStyle]:
     return {
         "Title": ParagraphStyle("AuditTitle", parent=base["Title"], fontName="Helvetica-Bold", fontSize=21, leading=25, alignment=TA_CENTER, textColor=colors.HexColor("#16324F"), spaceAfter=2),
         "Subtitle": ParagraphStyle("AuditSubtitle", parent=base["Normal"], fontName="Helvetica", fontSize=13, leading=16, alignment=TA_CENTER, textColor=colors.HexColor("#3B556D")),
-        "Heading": ParagraphStyle("AuditHeading", parent=base["Heading1"], fontName="Helvetica-Bold", fontSize=14, leading=17, textColor=colors.HexColor("#16324F"), spaceAfter=6),
-        "HeadingSmall": ParagraphStyle("AuditHeadingSmall", parent=base["Heading2"], fontName="Helvetica-Bold", fontSize=10.5, leading=13, textColor=colors.HexColor("#16324F"), spaceAfter=4),
+        "Heading": ParagraphStyle("AuditHeading", parent=base["Heading1"], fontName="Helvetica-Bold", fontSize=14, leading=17, textColor=colors.HexColor("#16324F"), spaceAfter=6, keepWithNext=1),
+        "HeadingSmall": ParagraphStyle("AuditHeadingSmall", parent=base["Heading2"], fontName="Helvetica-Bold", fontSize=10.5, leading=13, textColor=colors.HexColor("#16324F"), spaceAfter=4, keepWithNext=1),
         "Body": ParagraphStyle("AuditBody", parent=base["BodyText"], fontName="Helvetica", fontSize=8.4, leading=10.4, alignment=TA_LEFT),
         "TableCell": ParagraphStyle("AuditTableCell", parent=base["BodyText"], fontName="Helvetica", fontSize=7.2, leading=8.8, alignment=TA_LEFT, wordWrap="CJK"),
         "TableHeader": ParagraphStyle("AuditTableHeader", parent=base["BodyText"], fontName="Helvetica-Bold", fontSize=7.2, leading=8.8, textColor=colors.white, alignment=TA_LEFT, wordWrap="CJK"),
@@ -293,7 +306,7 @@ def _build_styles() -> dict[str, ParagraphStyle]:
 
 
 def _styled_table(rows: list[list[Paragraph]], widths: list[float], *, header: bool = False) -> Table:
-    table = Table(rows, colWidths=widths, repeatRows=1 if header else 0, hAlign="LEFT")
+    table = Table(rows, colWidths=widths, repeatRows=1 if header else 0, hAlign="LEFT", splitByRow=1)
     commands: list[tuple[object, ...]] = [
         ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C5D0D8")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -333,6 +346,34 @@ def _explanation_paragraph(value: str, style: ParagraphStyle) -> Paragraph:
     text = value.strip() or "-"
     escaped = escape(text, {'"': '&quot;'}).replace("\n", "<br/>")
     return Paragraph(escaped, style)
+
+
+def _explanation_blocks(value: str, style: ParagraphStyle) -> list[object]:
+    """Split existing explanation text only at its blank-line section breaks.
+
+    This is presentation-only: it does not recompute any reasoning.  A final
+    ``Reason:`` block remains one Paragraph with its first reason line, which
+    prevents the common two-line orphan at a page boundary.
+    """
+
+    blocks = [block.strip() for block in value.split("\n\n") if block.strip()]
+    if not blocks:
+        return [_explanation_paragraph("-", style)]
+    if len(blocks) == 1:
+        return [_explanation_paragraph(blocks[0], style)]
+
+    first = _explanation_paragraph(blocks[0], style)
+    # Keep a final Reason block with its first reason line.  All intervening
+    # stored explanation sections stay in a single split-capable Paragraph,
+    # which is both more compact and less prone to one-line spill pages.
+    final_reason = blocks[-1] if blocks[-1].startswith("Reason:") else None
+    middle_blocks = blocks[1:-1] if final_reason else blocks[1:]
+    result: list[object] = [first]
+    if middle_blocks:
+        result.append(_explanation_paragraph("\n\n".join(middle_blocks), style))
+    if final_reason:
+        result.append(KeepTogether([Spacer(1, 0.04 * inch), _explanation_paragraph(final_reason, style)]))
+    return result
 
 
 def _value(value: object | None) -> str:

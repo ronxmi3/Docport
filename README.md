@@ -203,21 +203,62 @@ end-to-end bundle in the official directory layout. No fake monolithic
 
 ## Docker
 
+Build the minimal runtime image:
+
 ```powershell
-docker build -t sdoc-pipeline .
+docker build -t sdoc-pipeline:latest .
+```
+
+Run the full test suite in the separate test target. Tests are not copied into
+the final runtime image:
+
+```powershell
+docker build --target test -t sdoc-pipeline:test .
+docker run --rm sdoc-pipeline:test
+```
+
+Create a host output directory, then run the mounted participant bundle. The
+bundle is read-only at `/data`; only `/output` is writable:
+
+```powershell
+New-Item -ItemType Directory -Force .\output | Out-Null
 
 docker run --rm `
-  -v "C:\path\to\sdoc-hackathon-bundle:/data" `
-  -v "${PWD}:/output" `
-  sdoc-pipeline `
+  -v "C:\path\to\sdoc-hackathon-bundle:/data:ro" `
+  -v "${PWD}\output:/output" `
+  sdoc-pipeline:latest `
   --source /data `
   --output /output/submission.json `
   --workers 8 `
   --benchmark
 ```
 
-The image excludes participant data, caches, output, and any ground-truth
-file; mount the actual bundle at runtime.
+The final image explicitly copies only application modules. Its Docker context
+also excludes participant/scoring data, reports, caches, virtual environments,
+temporary files, and common secret files. DOCX, XLSX/XLSM, PDF, and report
+files remain host-mounted data rather than image contents.
+
+### Bundled demo data
+
+For a self-contained demo, the reviewed `demo_data/` subset is copied into the
+runtime image at `/demo_data`. It contains only inbox records, attachments,
+`sample_submission.json`, the participant `loader.py`, and its README; scorer
+data, answer keys, reports, caches, archives, and secret files are excluded.
+
+```powershell
+docker build -t sdoc-pipeline:latest .
+
+docker run --rm `
+  -v "${PWD}\output:/output" `
+  sdoc-pipeline:latest `
+  --source /demo_data `
+  --output /output/submission.json `
+  --workers 8 `
+  --benchmark
+```
+
+Mounted participant bundles remain supported with `--source /data` as shown
+above.
 
 ## Project structure
 

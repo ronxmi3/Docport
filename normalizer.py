@@ -60,11 +60,33 @@ _NUMBER_WORDS = {
     "twelve": 12,
 }
 
+# A required field filled with one of these placeholders is not a value that
+# can safely be compared.  Keep this check before punctuation cleanup: for
+# example, ``____MT`` would otherwise become the misleading text ``mt``.
+_PLACEHOLDER_PATTERN = re.compile(
+    r"""^\s*(?:
+        tba|tbd|n\s*/?\s*a|nil|unknown|pending|
+        to\s+be\s+(?:advised|confirmed)|
+        [-_]+|
+        _+\s*(?:kg|kgs|kilograms?|mt|mts|metric\s*tons?)
+    )\s*$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_placeholder_value(value: object | None) -> bool:
+    """Return whether a source value is explicitly absent or provisional."""
+
+    if value is None:
+        return True
+    text = unicodedata.normalize("NFKC", str(value)).strip()
+    return not text or bool(_PLACEHOLDER_PATTERN.fullmatch(text))
+
 
 def normalize_text(value: str | None) -> str | None:
     """Return a case- and punctuation-insensitive text representation."""
 
-    if value is None:
+    if is_placeholder_value(value):
         return None
     text = unicodedata.normalize("NFKD", str(value))
     text = "".join(character for character in text if not unicodedata.combining(character))
@@ -88,26 +110,39 @@ def normalize_party(value: str | None) -> str | None:
 
 
 def normalize_port(value: str | None) -> str | None:
-    """Normalize common port spellings and UN/LOCODE forms."""
+    """Normalize port spelling while treating a UN/LOCODE as supporting data.
+
+    A named location is retained whenever present.  This avoids a malformed
+    code making two different ports equal, while still allowing code-only and
+    name-plus-code renderings of the same port to match.
+    """
 
     normalized = normalize_text(value)
     if not normalized:
         return None
 
-    compact = normalized.replace(" ", "")
-    if compact in _PORT_ALIASES:
-        return _PORT_ALIASES[compact]
-    if normalized in _PORT_ALIASES:
-        return _PORT_ALIASES[normalized]
+    # First normalize explicit name aliases (including a code-only value).
+    direct = _port_alias(normalized)
+    if direct is not None:
+        return direct
 
-    # A parenthesised UN/LOCODE, e.g. "Shanghai (CNSHA)", is more reliable
-    # than free-text country names when comparing two documents.
-    codes = re.findall(r"\b[a-z]{2}[a-z]{3}\b", normalized)
-    for code in codes:
-        if code in _PORT_ALIASES:
-            return _PORT_ALIASES[code]
-
+    tokens = normalized.split()
+    known_codes = [token for token in tokens if len(token) == 5 and token in _PORT_ALIASES]
+    named_location = " ".join(token for token in tokens if token not in known_codes)
+    if named_location:
+        # Names win over codes.  The code can corroborate a name but can never
+        # erase a conflicting location name from another document.
+        return _port_alias(named_location) or named_location
+    if known_codes:
+        return _PORT_ALIASES[known_codes[0]]
     return normalized
+
+
+def _port_alias(value: str) -> str | None:
+    """Resolve a whole normalized port value, never a substring within it."""
+
+    compact = value.replace(" ", "")
+    return _PORT_ALIASES.get(value) or _PORT_ALIASES.get(compact)
 
 
 def _decimal_from_text(number_text: str) -> Decimal | None:
@@ -148,7 +183,7 @@ def normalize_weight_kg(value: str | int | float | Decimal | None) -> str | None
     rather than guessed.
     """
 
-    if value is None:
+    if is_placeholder_value(value):
         return None
     raw = str(value).strip()
     if not raw:
@@ -184,7 +219,7 @@ def normalize_weight_kg(value: str | int | float | Decimal | None) -> str | None
 def normalize_container_count(value: str | int | None) -> str | None:
     """Return the total number of containers encoded in common SI/BL syntax."""
 
-    if value is None:
+    if is_placeholder_value(value):
         return None
     raw = str(value).strip()
     if not raw:

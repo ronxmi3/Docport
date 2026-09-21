@@ -55,10 +55,10 @@ FIELD_DISPLAY_NAMES: Mapping[str, str] = {
 class Attachment:
     """An attachment with processable text resolved by the loader.
 
-    ``content`` is plain text for TXT files, embedded text from a PDF, or
-    tab-delimited cell text from an XLSX/XLSM workbook. ``source`` retains the
-    original file so the CLI can still open it. OCR deliberately does not
-    belong in this first version.
+    ``content`` is plain text for TXT files, embedded text from a PDF, ordered
+    paragraph/table text from a DOCX, or tab-delimited cell text from an
+    XLSX/XLSM workbook. ``source`` retains the original file so the CLI can
+    still open it. OCR deliberately does not belong in this first version.
     """
 
     filename: str

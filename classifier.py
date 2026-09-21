@@ -48,6 +48,52 @@ _COMPARISON_PHRASES = (
     "document comparison",
     "compare documents",
 )
+# These subject phrases provide BL context, but cannot alone classify an email
+# that has no attachments: replies often retain an older thread subject after
+# the current message has changed topic.
+_BL_CONVERSATION_PHRASES = (
+    "to confirm docs",
+    "check docs",
+    "draft bl",
+    "bl draft",
+    "request bl draft",
+    "amend bl",
+    "verify bl",
+    "confirm bl",
+)
+_CURRENT_COMPARISON_ACTIONS = (
+    "compare",
+    "verify",
+    "check",
+    "review",
+    "confirm",
+    "validate",
+    "cross check",
+)
+_CURRENT_REQUEST_MARKERS = (
+    "please",
+    "kindly",
+    "can you",
+    "could you",
+    "need you to",
+    "request",
+    "required",
+)
+_CURRENT_DOCUMENT_TERMS = (
+    "si",
+    "shipping instruction",
+    "bl",
+    "bill of lading",
+    "draft bl",
+    "draft bill",
+    "document",
+    "documents",
+    "docs",
+)
+_THREAD_BOUNDARY = re.compile(
+    r"^\s*(?:>{1,}|[-_ ]{3,}(?:original\s+message|forwarded\s+message)[-_ ]{3,}|from:\s|on\s+.+\s+wrote:)",
+    re.IGNORECASE,
+)
 _SI_REQUEST_TERMS = (
     "new si",
     "new shipping instruction",
@@ -82,22 +128,23 @@ _INVOICE_TERMS = (
     "debit note",
     "freight charge",
 )
-_SPAM_STRONG_TERMS = (
-    "lottery",
-    "you have won",
-    "cryptocurrency investment",
-    "viagra",
-    "inheritance fund",
+# Spam is scored from independent risk signals rather than a single business
+# word.  In particular, legitimate freight/payment questions must not become
+# spam merely because they mention an invoice or payment.
+_SPAM_ACCOUNT_PHRASES = (
+    "verify your account",
+    "account verification",
+    "confirm your account",
+    "account suspended",
+    "unusual account activity",
 )
-_SPAM_SUPPORTING_TERMS = (
-    "unsubscribe",
-    "click here to claim",
-    "limited time offer",
-    "act now",
-    "earn money fast",
-    "winner",
-    "free gift",
-)
+_SPAM_CREDENTIAL_TERMS = ("password", "credential", "login", "sign in", "security code")
+_SPAM_URGENCY_TERMS = ("immediately", "act now", "urgent action", "within 24 hours", "final warning")
+_SPAM_LINK_TERMS = ("click here", "click the link", "payment link", "redirect")
+_SPAM_SUSPICIOUS_LINKS = ("bit ly", "tinyurl", "shorturl", "xyz", "top", "click")
+_SPAM_PRIZE_TERMS = ("lottery", "you have won", "winner", "claim your prize", "free gift")
+_SPAM_PROMOTION_TERMS = ("limited time offer", "exclusive offer", "unrealistic discount")
+_SPAM_INVESTMENT_TERMS = ("crypto", "cryptocurrency", "guaranteed return", "guaranteed returns", "get rich quick", "earn money fast")
 
 
 def classify_email(email: EmailRecord) -> Classification:
@@ -112,15 +159,23 @@ def classify_email(email: EmailRecord) -> Classification:
     attachment_text = _attachment_signals(email)
     combined = f"{subject_body} {attachment_text}".strip()
 
+    spam_reasons = _spam_reasons(subject_body)
+    if spam_reasons:
+        return Classification("SPAM", tuple(spam_reasons))
+
     has_si = _has_term(combined, _SI_TERMS)
     has_bl = _has_term(combined, _BL_TERMS)
     comparison_hits = _matching_terms(combined, _COMPARISON_TERMS)
     phrase_hits = _matching_terms(combined, _COMPARISON_PHRASES)
+    conversation_hits = _matching_terms(_fold(email.subject or ""), _BL_CONVERSATION_PHRASES)
 
-    # A direct phrase is decisive. Otherwise require evidence for both document
-    # types plus either a comparison action or a plausible two-document bundle.
-    if phrase_hits or (has_si and has_bl and (comparison_hits or len(email.attachments) >= 2)):
-        reasons = [*phrase_hits]
+    # Preserve attachment-bearing BL comparison behaviour.  Attachments are
+    # contemporaneous evidence, unlike a reply subject that may describe an
+    # earlier thread.
+    if email.attachments and (
+        phrase_hits or conversation_hits or (has_si and has_bl and (comparison_hits or len(email.attachments) >= 2))
+    ):
+        reasons = [*phrase_hits, *(f"BL conversation: {term}" for term in conversation_hits)]
         if has_si:
             reasons.append("SI signal")
         if has_bl:
@@ -129,10 +184,10 @@ def classify_email(email: EmailRecord) -> Classification:
             reasons.append(f"action: {comparison_hits[0]}")
         return Classification("BL_COMPARISON", tuple(reasons))
 
-    strong_spam = _matching_terms(combined, _SPAM_STRONG_TERMS)
-    supporting_spam = _matching_terms(combined, _SPAM_SUPPORTING_TERMS)
-    if strong_spam or len(supporting_spam) >= 2:
-        return Classification("SPAM", tuple([*strong_spam, *supporting_spam]))
+    if not email.attachments:
+        attachmentless_reasons = _attachmentless_bl_reasons(email, conversation_hits)
+        if attachmentless_reasons:
+            return Classification("BL_COMPARISON", tuple(attachmentless_reasons))
 
     si_request_hits = _matching_terms(combined, _SI_REQUEST_TERMS)
     if si_request_hits or (has_si and _has_term(combined, _REQUEST_TERMS)):
@@ -143,6 +198,96 @@ def classify_email(email: EmailRecord) -> Classification:
         return Classification("INVOICE_QUERY", tuple(invoice_hits))
 
     return Classification("GENERAL", ())
+
+
+def _attachmentless_bl_reasons(email: EmailRecord, subject_context: list[str]) -> list[str]:
+    """Recognise a current no-attachment comparison request conservatively.
+
+    Only the unquoted, current body can supply the request evidence.  A BL-ish
+    subject is context at most; it does not decide the category by itself.
+    """
+
+    current_body = _fold(_current_message_body(email.body or ""))
+    if not current_body:
+        return []
+
+    explicit_phrase = _matching_terms(current_body, _COMPARISON_PHRASES)
+    action_hits = _matching_terms(current_body, _CURRENT_COMPARISON_ACTIONS)
+    request_hits = _matching_terms(current_body, _CURRENT_REQUEST_MARKERS)
+    current_document_hits = _matching_terms(current_body, _CURRENT_DOCUMENT_TERMS)
+    current_request = bool(explicit_phrase) or bool(action_hits and request_hits)
+    if not current_request:
+        return []
+
+    # A current body that names its documents is self-contained.  Otherwise a
+    # BL conversation subject may provide the document context, but only after
+    # the body has independently established an actual comparison request.
+    if not current_document_hits and not subject_context:
+        return []
+
+    reasons = ["current body comparison request"]
+    if explicit_phrase:
+        reasons.append(f"current body phrase: {explicit_phrase[0]}")
+    elif action_hits:
+        reasons.append(f"current body action: {action_hits[0]}")
+    if current_document_hits:
+        reasons.append(f"current body document: {current_document_hits[0]}")
+    elif subject_context:
+        reasons.append(f"subject context: {subject_context[0]}")
+    return reasons
+
+
+def _current_message_body(body: str) -> str:
+    """Discard common quoted-thread boundaries before attachmentless rules."""
+
+    current_lines: list[str] = []
+    for line in body.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if _THREAD_BOUNDARY.match(line):
+            break
+        current_lines.append(line)
+    return "\n".join(current_lines)
+
+
+def _spam_reasons(text: str) -> list[str]:
+    """Return weighted, independently-supported spam evidence.
+
+    The input is subject/body/sender only.  Attachment filenames can be
+    arbitrary and should not turn a normal shipping record into spam.
+    """
+
+    account = _matching_terms(text, _SPAM_ACCOUNT_PHRASES)
+    credentials = _matching_terms(text, _SPAM_CREDENTIAL_TERMS)
+    urgency = _matching_terms(text, _SPAM_URGENCY_TERMS)
+    links = _matching_terms(text, _SPAM_LINK_TERMS)
+    suspicious_links = _matching_terms(text, _SPAM_SUSPICIOUS_LINKS)
+    prizes = _matching_terms(text, _SPAM_PRIZE_TERMS)
+    promotion = _matching_terms(text, _SPAM_PROMOTION_TERMS)
+    investment = _matching_terms(text, _SPAM_INVESTMENT_TERMS)
+    extreme_discount = bool(re.search(r"\b(?:9[0-9]|100)\s*(?:percent|off)\b", text))
+    fake_invoice_redirect = (
+        _has_term(text, ("invoice", "payment"))
+        and bool(links or suspicious_links)
+        and bool(urgency)
+    )
+
+    reasons: list[str] = []
+    if account and (credentials or links or urgency):
+        reasons.extend((f"account risk: {account[0]}", f"supporting risk: {(credentials or links or urgency)[0]}"))
+    elif len(prizes) >= 2 or ("you have won" in prizes and "lottery" in prizes):
+        reasons.extend(f"prize claim: {term}" for term in prizes)
+    elif investment and (
+        any(term in investment for term in ("guaranteed return", "guaranteed returns", "get rich quick", "earn money fast"))
+        or ("crypto" in investment or "cryptocurrency" in investment) and len(investment) >= 2
+    ):
+        reasons.extend(f"investment scam signal: {term}" for term in investment)
+    elif extreme_discount and (promotion or urgency or links):
+        reasons.append("extreme discount: 90%+ off")
+        reasons.append(f"supporting promotion: {(promotion or urgency or links)[0]}")
+    elif fake_invoice_redirect:
+        reasons.extend(("invoice/payment redirect", f"supporting urgency: {urgency[0]}"))
+    elif suspicious_links and (urgency or credentials or account):
+        reasons.extend((f"suspicious link: {suspicious_links[0]}", f"supporting risk: {(urgency or credentials or account)[0]}"))
+    return reasons
 
 
 def normalize_classification_text(value: str) -> str:

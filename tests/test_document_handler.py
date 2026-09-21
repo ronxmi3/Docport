@@ -1,4 +1,6 @@
-from document_handler import select_documents
+import pytest
+
+from document_handler import assess_attachment, select_documents
 from models import Attachment
 from tests.helpers import BL_TEXT, SI_TEXT
 
@@ -46,3 +48,22 @@ def test_content_title_rejects_a_packing_list_misnamed_as_a_bl() -> None:
     )
 
     assert selection.review_reason == "wrong_doc_type"
+
+
+@pytest.mark.parametrize(
+    ("filename", "content", "expected"),
+    (
+        ("instruction.pdf", "BILL OF LADING INSTRUCTION", "SI"),
+        ("instruction.pdf", "BL INSTRUCTION", "SI"),
+        ("instruction.pdf", "B/L INSTRUCTION", "SI"),
+        ("instruction.pdf", "BILL OF LADING", "BL"),
+        ("shipment_si.pdf", "BILL OF LADING", "BL"),
+        ("shipment_bl.pdf", "BILL OF LADING INSTRUCTION", "SI"),
+    ),
+)
+def test_instruction_style_content_wins_over_generic_bl_or_filename(
+    filename: str, content: str, expected: str
+) -> None:
+    assessment = assess_attachment(Attachment(filename, content))
+
+    assert assessment.document_type == expected
