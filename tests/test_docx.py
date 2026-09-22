@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from io import BytesIO
+
 import pytest
+from docx import Document
 
 from dataset_loader import load_dataset
 from docx_text import DocxTextExtractionError, extract_docx_text
@@ -44,6 +47,22 @@ def test_docx_text_keeps_paragraphs_and_tables_in_document_order() -> None:
 
     assert content.index("SHIPPING INSTRUCTION") < content.index("Shipper\tAcme Export Ltd.")
     assert content.index("Shipper\tAcme Export Ltd.") < content.index("END OF INSTRUCTION")
+
+
+def test_docx_text_includes_nested_table_cell_content() -> None:
+    document = Document()
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Shipper"
+    nested = table.cell(0, 1).add_table(rows=1, cols=2)
+    nested.cell(0, 0).text = "Company"
+    nested.cell(0, 1).text = "Acme Export Ltd."
+    output = BytesIO()
+    document.save(output)
+
+    content = extract_docx_text(output.getvalue())
+
+    assert "Shipper" in content
+    assert "Company Acme Export Ltd." in content
 
 
 def test_readable_docx_si_and_bl_use_shared_comparison_pipeline(tmp_path) -> None:

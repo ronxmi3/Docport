@@ -69,6 +69,7 @@ LABEL_PATTERNS: dict[str, tuple[str, ...]] = {
         r"containers?",
     ),
     "gross_weight_kg": (
+        r"total\s+gross\s+(?:weight|wt\.?)\s*(?:\([^)]*\))?",
         # Some supplied forms place a translated token immediately after
         # "Gross Weight" (for example ``Gross Weight毛重(KGS)``). Keep that
         # token inside the label so the value still begins at the colon.
@@ -131,7 +132,15 @@ def extract_fields(text: str) -> dict[str, str | None]:
             # on the following line(s). Do not scan arbitrary prose beyond the
             # first form block.
             if not trailing.strip(" \t:=-|"):
-                multiline = _collect_multiline_value(lines, index + 1)
+                # A table heading such as ``GROSS WEIGHT (KG)`` describes a
+                # column; its following cells can contain container IDs and
+                # cargo descriptions. It is not a form field value. Gross
+                # weight values therefore need an inline value, or a
+                # standalone numeric value directly below an actual label.
+                if field == "gross_weight_kg":
+                    multiline = _collect_gross_weight_value(lines, index + 1)
+                else:
+                    multiline = _collect_multiline_value(lines, index + 1)
                 if multiline:
                     fields[field] = multiline
 
@@ -202,6 +211,13 @@ def _extract_inline_value(trailing: str) -> str | None:
 
     if not trailing:
         return None
+    # Some bilingual DOCX forms put a presentation-only qualifier between the
+    # English field label and its tabular value, e.g. ``Shipper (Chinese)\t…``.
+    # It is safe to ignore only when a real field separator immediately follows
+    # the qualifier; prose in parentheses remains a value, not a label suffix.
+    qualifier = re.match(r"^\s*\([^\n)]{1,100}\)\s*(?=(?::|=|\||-|\t| {2,}))", trailing)
+    if qualifier:
+        trailing = trailing[qualifier.end() :]
     # `:`, `-`, `=`, `|`, tabs, or a visually aligned two-space column are
     # deliberate field separators. A lone prose space is not enough.
     has_separator = bool(re.match(r"\s*(?::|=|\||-|\t| {2,})", trailing))
@@ -221,12 +237,53 @@ def _collect_multiline_value(lines: list[str], start_index: int) -> str | None:
             continue
         if _find_label_matches(line):
             break
+        if _is_field_boundary(stripped):
+            break
         if re.fullmatch(r"[-_=]{3,}", stripped):
             if values:
                 break
             continue
         values.append(stripped)
     return _clean_value(" ".join(values))
+
+
+def _collect_gross_weight_value(lines: list[str], start_index: int) -> str | None:
+    """Return only a standalone weight directly beneath a gross-weight label.
+
+    This intentionally refuses identifiers such as ``PURJ4736471`` and mixed
+    table rows. A labelled total such as ``TOTAL Gross Wt (kgs): 131,322 KG``
+    is handled above as an inline field, before this fallback is needed.
+    """
+
+    for line in lines[start_index : start_index + 3]:
+        value = line.strip()
+        if not value:
+            continue
+        if _find_label_matches(line) or _is_field_boundary(value):
+            return None
+        if re.fullmatch(r"\d[\d,.\s]*(?:kg|kgs|kilograms?)?", value, re.I):
+            return _clean_value(value)
+        return None
+    return None
+
+
+def _is_field_boundary(value: str) -> bool:
+    """Recognise adjacent transport/table headings in linearised PDFs.
+
+    PDF text extraction often converts neighbouring form cells into one line
+    stream. These headings end a preceding value even though they are not one
+    of the seven required comparison fields.
+    """
+
+    return bool(
+        re.match(
+            r"(?:ocean\s+vessel|export\s+carrier|vessel(?:\s*,?\s*voyage)?|"
+            r"container\s+(?:no\.?|number)|description|commodity|cargo\s+description|"
+            r"goods\s+description)\b",
+            value,
+            re.I,
+        )
+    )
 
 
 def _clean_value(value: str) -> str | None:

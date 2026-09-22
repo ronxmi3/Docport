@@ -145,6 +145,7 @@ _SPAM_SUSPICIOUS_LINKS = ("bit ly", "tinyurl", "shorturl", "xyz", "top", "click"
 _SPAM_PRIZE_TERMS = ("lottery", "you have won", "winner", "claim your prize", "free gift")
 _SPAM_PROMOTION_TERMS = ("limited time offer", "exclusive offer", "unrealistic discount")
 _SPAM_INVESTMENT_TERMS = ("crypto", "cryptocurrency", "guaranteed return", "guaranteed returns", "get rich quick", "earn money fast")
+_SPAM_INVESTMENT_CONTEXT = ("bitcoin", "crypto", "cryptocurrency", "investment opportunity")
 
 
 def classify_email(email: EmailRecord) -> Classification:
@@ -189,8 +190,8 @@ def classify_email(email: EmailRecord) -> Classification:
         if attachmentless_reasons:
             return Classification("BL_COMPARISON", tuple(attachmentless_reasons))
 
-    si_request_hits = _matching_terms(combined, _SI_REQUEST_TERMS)
-    if si_request_hits or (has_si and _has_term(combined, _REQUEST_TERMS)):
+    si_request_hits, si_request_evidence = _si_request_evidence(email, combined, has_si)
+    if si_request_evidence:
         return Classification("SI_REQUEST", tuple(si_request_hits or ("SI request language",)))
 
     invoice_hits = _matching_terms(combined, _INVOICE_TERMS)
@@ -237,6 +238,30 @@ def _attachmentless_bl_reasons(email: EmailRecord, subject_context: list[str]) -
     return reasons
 
 
+def _si_request_evidence(email: EmailRecord, combined: str, has_si: bool) -> tuple[list[str], bool]:
+    """Use the current body to resolve no-attachment subject/body conflicts.
+
+    Email clients retain old subjects in long threads. For an attachmentless
+    email with a substantive current body, a subject phrase like ``Submit SI``
+    is context rather than a decision by itself. Empty bodies retain the
+    existing subject-based fallback, and attachment-bearing records retain
+    their combined document evidence.
+    """
+
+    if email.attachments:
+        hits = _matching_terms(combined, _SI_REQUEST_TERMS)
+        return hits, bool(hits or (has_si and _has_term(combined, _REQUEST_TERMS)))
+
+    current_body = _fold(_current_message_body(email.body or ""))
+    if not current_body:
+        hits = _matching_terms(combined, _SI_REQUEST_TERMS)
+        return hits, bool(hits or (has_si and _has_term(combined, _REQUEST_TERMS)))
+
+    hits = _matching_terms(current_body, _SI_REQUEST_TERMS)
+    current_has_si = _has_term(current_body, _SI_TERMS)
+    return hits, bool(hits or (current_has_si and _has_term(current_body, _REQUEST_TERMS)))
+
+
 def _current_message_body(body: str) -> str:
     """Discard common quoted-thread boundaries before attachmentless rules."""
 
@@ -263,6 +288,12 @@ def _spam_reasons(text: str) -> list[str]:
     prizes = _matching_terms(text, _SPAM_PRIZE_TERMS)
     promotion = _matching_terms(text, _SPAM_PROMOTION_TERMS)
     investment = _matching_terms(text, _SPAM_INVESTMENT_TERMS)
+    investment_context = _matching_terms(text, _SPAM_INVESTMENT_CONTEXT)
+    guaranteed_percentage_return = bool(
+        # ``text`` has already been punctuation-folded, so ``300% returns``
+        # becomes ``300 returns`` while a written "percent" remains present.
+        re.search(r"\bguaranteed\s+\d{2,4}\s*(?:percent\s+)?(?:return|returns)\b", text)
+    )
     extreme_discount = bool(re.search(r"\b(?:9[0-9]|100)\s*(?:percent|off)\b", text))
     fake_invoice_redirect = (
         _has_term(text, ("invoice", "payment"))
@@ -275,6 +306,10 @@ def _spam_reasons(text: str) -> list[str]:
         reasons.extend((f"account risk: {account[0]}", f"supporting risk: {(credentials or links or urgency)[0]}"))
     elif len(prizes) >= 2 or ("you have won" in prizes and "lottery" in prizes):
         reasons.extend(f"prize claim: {term}" for term in prizes)
+    elif guaranteed_percentage_return and investment_context:
+        reasons.extend(
+            ("investment scam signal: guaranteed percentage return", f"investment context: {investment_context[0]}")
+        )
     elif investment and (
         any(term in investment for term in ("guaranteed return", "guaranteed returns", "get rich quick", "earn money fast"))
         or ("crypto" in investment or "cryptocurrency" in investment) and len(investment) >= 2

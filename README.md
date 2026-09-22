@@ -2,9 +2,10 @@
 
 Deterministic, production-style classification and Shipping Instruction (SI)
 versus draft Bill of Lading (BL) verification for the SDOC hackathon. It uses
-only participant email and attachment text: no LLM, OCR, database, or scoring
-data. TXT files and PDFs with an embedded text layer are supported; image-only
-or encrypted PDFs are safely routed to review without OCR.
+only participant email and attachment text: no LLM, database, or scoring data.
+TXT files, embedded-text PDFs, and image-only PDFs are supported. PDFs use
+Tesseract OCR only when their embedded text is empty or insufficient; a failed
+or low-confidence OCR pass is safely routed to review.
 
 ## What it does
 
@@ -90,6 +91,15 @@ python -m venv .venv
 ```
 
 Use `requirements.txt` for runtime-only installation.
+
+### OCR for scanned PDFs
+
+The Python packages render scanned PDF pages locally, while Tesseract performs
+the OCR. Docker installs Tesseract automatically. For local Windows runs,
+install [UB Mannheim Tesseract](https://github.com/UB-Mannheim/tesseract/wiki)
+and ensure `tesseract.exe` is on `PATH` (or set `pytesseract.pytesseract.tesseract_cmd`
+in your local environment). If it is unavailable or cannot read a scan, the
+pipeline preserves the existing `NEEDS_REVIEW / unreadable` outcome.
 
 ## Run locally
 

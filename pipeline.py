@@ -139,11 +139,15 @@ def process_email(email: EmailRecord, logger: logging.Logger | None = None) -> E
         # Do not compare absent or invalid values: that would turn a document
         # quality problem into a fabricated mismatch.
         if _has_missing_value(si_normalized) or _has_missing_value(bl_normalized):
+            # OCR text follows the same extractor as embedded text. If it
+            # cannot provide all required values, retain the safe unreadable
+            # outcome when a scan cannot provide a safe complete comparison.
+            review_reason = "unreadable" if _ocr_data_is_insufficient(selection) else "missing_value"
             return _decision(
                 email=email,
                 category=classification.label,
                 status="NEEDS_REVIEW",
-                review_reason="missing_value",
+                review_reason=review_reason,
                 classification_reasons=classification.reasons,
                 selection=selection,
                 si_raw=si_raw,
@@ -242,6 +246,15 @@ def process_inbox(inbox: Iterable[EmailRecord], workers: int = 1) -> dict[str, d
 
 def _has_missing_value(values: Mapping[str, str | None]) -> bool:
     return any(values.get(field) is None for field in REQUIRED_FIELDS)
+
+
+def _ocr_data_is_insufficient(selection: DocumentSelection) -> bool:
+    """Whether a selected scan reached extraction but lacks comparison data."""
+
+    return any(
+        attachment is not None and attachment.metadata.get("extraction") == "OCR (Tesseract)"
+        for attachment in (selection.si_attachment, selection.bl_attachment)
+    )
 
 
 def _decision(

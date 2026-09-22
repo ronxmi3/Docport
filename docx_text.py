@@ -66,7 +66,7 @@ def _iter_document_blocks(document):  # type: ignore[no-untyped-def]
 
 
 def _table_rows(table: Table) -> list[str]:
-    """Render each non-empty table row, avoiding duplicate merged cells."""
+    """Render each non-empty table row, including text in nested cell tables."""
 
     rendered: list[str] = []
     for row in table.rows:
@@ -79,12 +79,29 @@ def _table_rows(table: Table) -> list[str]:
             if cell_identity in seen_cells:
                 continue
             seen_cells.add(cell_identity)
-            text = _clean_text(cell.text)
+            text = _cell_text(cell)
             if text:
                 cells.append(text)
         if cells:
             rendered.append("\t".join(cells))
     return rendered
+
+
+def _cell_text(cell) -> str:  # type: ignore[no-untyped-def]
+    """Linearise direct paragraphs and nested tables in a table cell.
+
+    ``cell.text`` is convenient for simple DOCX files but does not preserve a
+    useful row structure for nested tables. Keeping the nested rows in the
+    same shared text stream lets the normal field extractor handle both forms.
+    """
+
+    pieces = [_clean_text(paragraph.text) for paragraph in cell.paragraphs]
+    pieces = [piece for piece in pieces if piece]
+    for nested_table in cell.tables:
+        nested_rows = _table_rows(nested_table)
+        if nested_rows:
+            pieces.append(" | ".join(nested_rows))
+    return _clean_text(" ".join(pieces))
 
 
 def _clean_text(value: str) -> str:

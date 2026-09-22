@@ -13,7 +13,7 @@ from typing import Any, Callable, Mapping
 
 from models import Attachment, EmailRecord
 from docx_text import extract_docx_text
-from pdf_text import extract_pdf_text
+from pdf_text import extract_pdf_text_result
 from xlsx_text import extract_xlsx_text
 
 
@@ -114,10 +114,11 @@ def coerce_attachment(
                 filename, source, metadata, "PDF extraction requires an attachment bytes reader"
             )
         try:
-            content = extract_pdf_text(attachment_bytes_reader(source_reference))
+            pdf_result = extract_pdf_text_result(attachment_bytes_reader(source_reference))
+            content = pdf_result.text
         except Exception as exc:  # a failed PDF read is local to this attachment
             return _unreadable_attachment(filename, source, metadata, str(exc), source_format="PDF")
-        metadata.update({"source_format": "PDF", "extraction": "embedded text"})
+        metadata.update({"source_format": "PDF", "extraction": pdf_result.method})
     elif suffix == ".docx":
         if attachment_bytes_reader is None:
             return _unreadable_attachment(
