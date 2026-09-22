@@ -1,0 +1,8 @@
+SHIPPING INSTRUCTION
+Shipper: ACME EXPORT LIMITED
+Consignee: BETA IMPORTS INCORPORATED
+Notify Party: BETA IMPORTS INCORPORATED
+Port of Loading: Shanghai, China
+Port of Discharge: Los Angeles, USA
+No. of Containers: 3 containers
+Total Gross Weight: 12,500 KG

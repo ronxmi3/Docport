@@ -1,0 +1,8 @@
+DRAFT BILL OF LADING
+Shipper: ACME EXPORT LIMITED
+Consignee: BETA IMPORTS INCORPORATED
+Notify Party: BETA IMPORTS INCORPORATED
+Load Port: Shanghai, China
+Discharge Port: Los Angeles, USA
+Containers: 3 containers
+Gross Weight KG: 12,500 KG

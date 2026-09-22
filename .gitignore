@@ -12,3 +12,12 @@ inbox/
 sample_submission.json
 ground_truth.json
 *.py[cod]
+# Keep the synthetic public demo dataset
+!demo_data/
+!demo_data/inbox/
+!demo_data/inbox/**
+!demo_data/attachments/
+!demo_data/attachments/**
+!demo_data/sample_submission.json
+
+*.code-workspace

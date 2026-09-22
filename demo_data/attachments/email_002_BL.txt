@@ -1,0 +1,8 @@
+DRAFT BILL OF LADING
+Shipper: OCEANIC PAPER SDN BHD
+Consignee: PACIFIC TRADING LLC
+Notify Party: PACIFIC TRADING LLC
+Load Port: Port Klang, Malaysia
+Discharge Port: Singapore
+Containers: 3 containers
+Gross Weight KG: 8,000 KG

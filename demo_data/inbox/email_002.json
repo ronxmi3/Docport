@@ -1,0 +1,9 @@
+{
+  "email_id": "email_002",
+  "subject": "Compare SI against draft BL",
+  "body": "Please check the attached shipping documents before release.",
+  "attachments": [
+    "attachments/email_002_SI.txt",
+    "attachments/email_002_BL.txt"
+  ]
+}

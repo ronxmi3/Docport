@@ -1,0 +1,37 @@
+{
+  "email_001": {
+    "category": null,
+    "status": null,
+    "has_defect": false,
+    "defect_fields": [],
+    "review_reason": null
+  },
+  "email_002": {
+    "category": null,
+    "status": null,
+    "has_defect": false,
+    "defect_fields": [],
+    "review_reason": null
+  },
+  "email_003": {
+    "category": null,
+    "status": null,
+    "has_defect": false,
+    "defect_fields": [],
+    "review_reason": null
+  },
+  "email_004": {
+    "category": null,
+    "status": null,
+    "has_defect": false,
+    "defect_fields": [],
+    "review_reason": null
+  },
+  "email_005": {
+    "category": null,
+    "status": null,
+    "has_defect": false,
+    "defect_fields": [],
+    "review_reason": null
+  }
+}

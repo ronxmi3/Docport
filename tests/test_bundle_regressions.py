@@ -12,6 +12,14 @@ from pipeline import process_records
 
 
 DEMO_DATA = Path(__file__).resolve().parents[1] / "demo_data"
+PRIVATE_BUNDLE_AVAILABLE = (
+    DEMO_DATA / "inbox" / "email_059.json"
+).is_file()
+
+pytestmark = pytest.mark.skipif(
+    not PRIVATE_BUNDLE_AVAILABLE,
+    reason="requires private SDOC challenge bundle fixtures",
+)
 
 
 def _decision_for(email_id: str):

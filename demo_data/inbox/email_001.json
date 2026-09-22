@@ -1,0 +1,9 @@
+{
+  "email_id": "email_001",
+  "subject": "Please compare SI and BL",
+  "body": "Please verify the attached draft Bill of Lading against the Shipping Instruction.",
+  "attachments": [
+    "attachments/email_001_SI.txt",
+    "attachments/email_001_BL.txt"
+  ]
+}

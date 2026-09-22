@@ -11,13 +11,13 @@ services:
       AVERIS_SOURCE: /demo_data
       AVERIS_OUTPUT: /output/submission.json
       AVERIS_REPORT: /output/decision_report.pdf
-      AVERIS_CORS_ORIGINS: http://localhost:3000
+      AVERIS_CORS_ORIGINS: http://localhost:3004,http://127.0.0.1:3004
   frontend:
     build:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: http://localhost:8000
     ports:
-      - "3000:3000"
+      - "3004:3000"
     depends_on:
       - api
