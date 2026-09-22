@@ -17,7 +17,7 @@ const navigation = [
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const active = navigation.find((item) => item.href === "/" ? pathname === "/" : pathname.startsWith(item.href))?.label ?? "Averis";
+  const active = navigation.find((item) => item.href === "/" ? pathname === "/" : pathname.startsWith(item.href))?.label ?? "DocPort";
 
   return (
     <div className="min-h-screen bg-canvas">
@@ -26,7 +26,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         <div className="flex items-center justify-between px-2">
           <Link href="/" className="flex items-center gap-3" onClick={() => setOpen(false)}>
             <span className="flex h-10 w-10 items-center justify-center rounded-xl border border-cyan/30 bg-cyan/10 text-cyan"><ShieldCheck size={21} /></span>
-            <span><span className="block text-sm font-semibold tracking-wide text-ink">AVERIS</span><span className="block text-[10px] uppercase tracking-[0.18em] text-muted">Shipping intelligence</span></span>
+            <span><span className="block text-sm font-semibold tracking-wide text-ink">DOCPORT</span><span className="block text-[10px] uppercase tracking-[0.18em] text-muted">Shipping intelligence</span></span>
           </Link>
           <button className="icon-button lg:hidden" onClick={() => setOpen(false)} aria-label="Close navigation"><X size={18} /></button>
         </div>

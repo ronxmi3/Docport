@@ -3,7 +3,7 @@ import "./globals.css";
 import { AppShell } from "@/components/app-shell";
 
 export const metadata: Metadata = {
-  title: "Averis Shipping Intelligence",
+  title: "DocPort Shipping Intelligence",
   description: "AI-Assisted Shipping Document Verification",
 };
 
