@@ -964,6 +964,23 @@ defect_fields:
 The reviewer sees the exact field responsible for the failure instead of receiving only a generic error.
 
 ---
+## Docker Integration
+
+DocPort is fully containerized using Docker.
+
+The project includes:
+
+- `Dockerfile` — reproducible Python pipeline and test environment
+- `Dockerfile.api` — containerized FastAPI backend
+- `docker-compose.yml` — orchestrates the DocPort frontend and backend services
+- Tesseract OCR is installed inside the backend container, so scanned PDF processing does not depend on the host machine's OCR installation
+
+### Run DocPort with Docker
+
+From the project root:
+
+```bash
+docker compose up --build
 
 # Future Improvements
 
