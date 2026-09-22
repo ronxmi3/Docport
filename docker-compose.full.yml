@@ -1,0 +1,7 @@
+services:
+  api:
+    volumes:
+      - ./output:/output
+      - ${SDOC_BUNDLE_PATH}:/data:ro
+    environment:
+      AVERIS_SOURCE: /data
